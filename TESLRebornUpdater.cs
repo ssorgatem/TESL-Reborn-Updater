@@ -189,7 +189,8 @@ public class TESLRebornUpdater
     private string GetLatestZipUrl()
     {
         LogMessage($"Fetching download page: {DownloadPage}");
-        
+        // Force use of TLS 1.2 (fixes SSL/TLS errors on older .NET)
+        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
         using (WebClient client = new WebClient())
         {
             client.Headers.Add("User-Agent", "TESL-Reborn-Updater/1.0");
@@ -236,24 +237,86 @@ public class TESLRebornUpdater
         }
     }
     
-    private List<int> ExtractVersion(string url)
+private List<int> ExtractVersion(string url)
+{
+    List<int> version = new List<int>();
+    
+    // Find all sequences of digits separated by dots
+    int startIndex = -1;
+    int endIndex = -1;
+    
+    for (int i = 0; i < url.Length; i++)
     {
-        var version = new List<int>();
-        var match = Regex.Match(url, @"\d+(?:\.\d+)+");
-        
-        if (match.Success)
+        if (char.IsDigit(url[i]))
         {
-            foreach (var part in match.Value.Split('.'))
+            if (startIndex == -1)
             {
-                if (int.TryParse(part, out int num))
+                startIndex = i;
+            }
+            endIndex = i;
+        }
+        else if (url[i] == '.' && startIndex != -1 && i + 1 < url.Length && char.IsDigit(url[i + 1]))
+        {
+            // Continue through dots that are part of version
+            endIndex = i;
+        }
+        else
+        {
+            if (startIndex != -1 && endIndex != -1)
+            {
+                // Check if this looks like a version number (has dots)
+                string potentialVersion = url.Substring(startIndex, endIndex - startIndex + 1);
+                if (potentialVersion.Contains("."))
                 {
-                    version.Add(num);
+                    // Manual parsing without Split
+                    string currentNumber = "";
+                    for (int j = 0; j < potentialVersion.Length; j++)
+                    {
+                        if (char.IsDigit(potentialVersion[j]))
+                        {
+                            currentNumber += potentialVersion[j];
+                        }
+                        else if (potentialVersion[j] == '.')
+                        {
+                            if (currentNumber.Length > 0)
+                            {
+                                int num;
+                                if (int.TryParse(currentNumber, out num))
+                                {
+                                    version.Add(num);
+                                }
+                                currentNumber = "";
+                            }
+                        }
+                    }
+                    
+                    // Add the last number
+                    if (currentNumber.Length > 0)
+                    {
+                        int num;
+                        if (int.TryParse(currentNumber, out num))
+                        {
+                            version.Add(num);
+                        }
+                    }
+                    
+                    // Found a version, return it
+                    if (version.Count > 0)
+                    {
+                        return version;
+                    }
                 }
+                
+                // Reset for next potential version
+                startIndex = -1;
+                endIndex = -1;
+                version.Clear();
             }
         }
-        
-        return version;
     }
+    
+    return version;
+}
     
     private int CompareVersions(List<int> a, List<int> b)
     {
