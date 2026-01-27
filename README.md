@@ -12,10 +12,9 @@ Linux:
 
 Windows:
 
-updater.bat %command%
+powershell -WindowStyle Hidden -Command "Start-Process TESLRebornUpdater.exe -Wait -WindowStyle Hidden; & '%command%'"
 
-(you can omit the WINEDLLOVERRIDES="winhttp=n,b" part on Windows).
 
 I can only test on Manjaro and SteamOS.
 
-Thanks to Solo_mag for testing on their Windows system
+Thanks to Solo_mag for testing on their Windows system and for finding the magic powershell invocation
