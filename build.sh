@@ -5,3 +5,4 @@ mcs -target:exe -out:TESLRebornUpdater.exe \
     -reference:"System.IO.Compression.FileSystem.dll" \
     -optimize \
     TESLRebornUpdater.cs
+apack TESLRebornUpdater.zip TESLRebornUpdater.exe updater.bat
