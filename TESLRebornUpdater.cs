@@ -15,7 +15,8 @@ class Program
 
 public class TESLRebornUpdater
 {
-    private readonly string DownloadPage = "https://tesl-reborn.com/download";
+    private readonly string ApiUrl = "https://tesl-reborn.com/download";
+    private readonly string UserAgent = "TESL-Reborn-Updater/2.0";
     private string _logFilePath;
     
     public void Run()
@@ -42,22 +43,35 @@ public class TESLRebornUpdater
             Console.WriteLine("\n[1/4] Checking for updates...");
             LogMessage("Phase 1: Checking for updates");
             
-            string zipUrl = GetLatestZipUrl();
-            string fileName = Path.GetFileName(new Uri(zipUrl).LocalPath);
-            Console.WriteLine($"    Found: {fileName}");
-            LogMessage($"Latest version found: {fileName}");
+            // Get update info from API
+            var updateInfo = GetLatestUpdateInfo();
+            
+            if (updateInfo == null || string.IsNullOrEmpty(updateInfo.Item1) || string.IsNullOrEmpty(updateInfo.Item2))
+            {
+                throw new Exception("Failed to retrieve update information from API");
+            }
+            
+            string version = updateInfo.Item1;
+            string zipUrl = updateInfo.Item2;
+            
+            Console.WriteLine($"    Version {version} found");
+            Console.WriteLine($"    File: {Path.GetFileName(zipUrl)}");
+            
+            LogMessage($"Latest version found: {version}");
             LogMessage($"Download URL: {zipUrl}");
             
             Console.WriteLine("\n[2/4] Downloading...");
             LogMessage("Phase 2: Downloading");
             
-            string zipPath = DownloadFile(zipUrl, downloadDir);
+            string zipPath = DownloadFile(zipUrl, downloadDir, version);
             
             if (zipPath == null)
             {
                 Console.WriteLine("    Already up to date!");
                 LogMessage("Update: Already up to date, skipping download");
-                WaitAndExit();
+                Console.WriteLine("\n✅ Already up to date!");
+                LogMessage("SUCCESS: Already up to date");
+                LogMessage("=======================================");
                 return;
             }
             
@@ -75,27 +89,15 @@ public class TESLRebornUpdater
             Console.WriteLine($"    Extracted {extractedCount} files");
             LogMessage($"Extracted {extractedCount} files to: {gameDir}");
             
-            Console.WriteLine("\n[4/4] Cleaning up...");
-            LogMessage("Phase 4: Cleaning up old downloads");
+            Console.WriteLine("\n[4/4] Complete!");
+            LogMessage("Phase 4: Update completed");
             
-            int cleanedCount = CleanupOldDownloads(zipPath, downloadDir);
-            if (cleanedCount > 0)
-            {
-                Console.WriteLine($"    Removed {cleanedCount} old file(s)");
-                LogMessage($"Cleaned up {cleanedCount} old download(s)");
-            }
-            else
-            {
-                Console.WriteLine("    No old files to remove");
-                LogMessage("No old downloads to clean up");
-            }
-            
-            Console.WriteLine("\n✅ Update completed successfully!");
-            LogMessage("SUCCESS: Update completed successfully");
+            Console.WriteLine($"\n✅ Update to version {version} completed successfully!");
+            LogMessage($"SUCCESS: Update to version {version} completed successfully");
             LogMessage("=======================================");
             
             // Also write success to a separate marker file
-            WriteSuccessMarker(gameDir);
+            WriteSuccessMarker(gameDir, version);
         }
         catch (Exception e)
         {
@@ -107,8 +109,147 @@ public class TESLRebornUpdater
             // Write error to a separate error log
             WriteErrorLog(e);
         }
+    }
+    
+    // Simple JSON parser for extracting version and url
+    private Tuple<string, string> GetLatestUpdateInfo()
+    {
+        LogMessage($"Fetching update info from API: {ApiUrl}");
         
-        WaitAndExit();
+        // Force use of TLS 1.2 (fixes SSL/TLS errors on older .NET)
+        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+        
+        using (WebClient client = new WebClient())
+        {
+            // Set headers for JSON API using global UserAgent
+            client.Headers.Add("User-Agent", UserAgent);
+            client.Headers.Add("Accept", "application/json");
+            
+            try
+            {
+                // Download the JSON response
+                string jsonResponse = client.DownloadString(ApiUrl);
+                LogMessage($"API response received ({jsonResponse.Length} bytes)");
+                
+                // Simple JSON parsing - extract version and url
+                string version = ExtractJsonValue(jsonResponse, "version");
+                string url = ExtractJsonValue(jsonResponse, "url");
+                
+                if (string.IsNullOrEmpty(version))
+                {
+                    LogMessage("ERROR: Version field missing in API response");
+                    throw new Exception("Version information missing in API response");
+                }
+                
+                if (string.IsNullOrEmpty(url))
+                {
+                    LogMessage("ERROR: URL field missing in API response");
+                    throw new Exception("Download URL missing in API response");
+                }
+                
+                LogMessage($"API parsed successfully - Version: {version}, URL: {url}");
+                
+                return new Tuple<string, string>(version, url);
+            }
+            catch (WebException webEx)
+            {
+                LogMessage($"WebException when calling API: {webEx.Message}");
+                
+                if (webEx.Response is HttpWebResponse httpResponse)
+                {
+                    LogMessage($"HTTP Status Code: {httpResponse.StatusCode} ({httpResponse.StatusDescription})");
+                    
+                    // Try to read the error response
+                    try
+                    {
+                        using (StreamReader reader = new StreamReader(webEx.Response.GetResponseStream()))
+                        {
+                            string errorResponse = reader.ReadToEnd();
+                            LogMessage($"Error response body: {errorResponse}");
+                        }
+                    }
+                    catch { }
+                }
+                
+                throw new Exception($"Failed to connect to update server: {webEx.Message}");
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"Exception when parsing API response: {ex.Message}");
+                throw new Exception($"Failed to process update information: {ex.Message}");
+            }
+        }
+    }
+    
+    // Simple method to extract values from JSON
+    private string ExtractJsonValue(string json, string key)
+    {
+        try
+        {
+            // Find the key in the JSON
+            string searchPattern = $"\"{key}\"\\s*:\\s*\"";
+            Match match = Regex.Match(json, searchPattern + "([^\"]+)\"");
+            
+            if (match.Success)
+            {
+                string value = match.Groups[1].Value;
+                // Unescape JSON characters (especially \/)
+                value = UnescapeJsonString(value);
+                return value;
+            }
+            
+            // Also try without quotes (for numeric or boolean values)
+            searchPattern = $"\"{key}\"\\s*:\\s*";
+            match = Regex.Match(json, searchPattern + "([^,}\\s\"]+)");
+            
+            if (match.Success)
+            {
+                string value = match.Groups[1].Value.Trim();
+                return value;
+            }
+            
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+    
+    // Unescape JSON string (handles \/, \", \\, \n, \r, \t, etc.)
+    private string UnescapeJsonString(string jsonString)
+    {
+        if (string.IsNullOrEmpty(jsonString))
+            return jsonString;
+            
+        // Replace escaped forward slashes first
+        string result = jsonString.Replace("\\/", "/");
+        
+        // Handle other common JSON escapes
+        result = result.Replace("\\\"", "\"")
+                      .Replace("\\\\", "\\")
+                      .Replace("\\n", "\n")
+                      .Replace("\\r", "\r")
+                      .Replace("\\t", "\t")
+                      .Replace("\\b", "\b")
+                      .Replace("\\f", "\f");
+        
+        // Handle Unicode escapes (simple version - \uXXXX)
+        // This regex matches \u followed by 4 hex digits
+        result = Regex.Replace(result, @"\\u([0-9a-fA-F]{4})", match =>
+        {
+            try
+            {
+                int unicodeValue = Convert.ToInt32(match.Groups[1].Value, 16);
+                return char.ConvertFromUtf32(unicodeValue);
+            }
+            catch
+            {
+                return match.Value; // Return original if conversion fails
+            }
+        });
+        
+        return result;
     }
     
     private string FormatFileSize(long bytes)
@@ -148,12 +289,13 @@ public class TESLRebornUpdater
         }
     }
     
-    private void WriteSuccessMarker(string gameDir)
+    private void WriteSuccessMarker(string gameDir, string version)
     {
         try
         {
             string markerPath = Path.Combine(gameDir, "TESLReborn_Update_Success.txt");
             string content = $"Last successful update: {DateTime.Now:yyyy-MM-dd HH:mm:ss}\n";
+            content += $"Version: {version}\n";
             content += $"Log file: {_logFilePath}\n";
             File.WriteAllText(markerPath, content);
         }
@@ -175,168 +317,22 @@ public class TESLRebornUpdater
         catch { }
     }
     
-    private void WaitAndExit()
-    {
-        LogMessage($"Process completed at {DateTime.Now:HH:mm:ss}");
-        
-        if (File.Exists(_logFilePath))
-        {
-            FileInfo logFile = new FileInfo(_logFilePath);
-            LogMessage($"Total log file size: {FormatFileSize(logFile.Length)}");
-        }
-    }
-    
-    private string GetLatestZipUrl()
-    {
-        LogMessage($"Fetching download page: {DownloadPage}");
-        // Force use of TLS 1.2 (fixes SSL/TLS errors on older .NET)
-        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
-        using (WebClient client = new WebClient())
-        {
-            client.Headers.Add("User-Agent", "TESL-Reborn-Updater/1.0");
-            client.Headers.Add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-            
-            string html = client.DownloadString(DownloadPage);
-            LogMessage($"Download page fetched successfully ({html.Length} bytes)");
-            
-            List<string> zipLinks = new List<string>();
-            var regex = new Regex(@"href=[""']([^""']+\.zip)[""']", RegexOptions.IgnoreCase);
-            
-            foreach (Match match in regex.Matches(html))
-            {
-                if (match.Groups[1].Success)
-                {
-                    string link = match.Groups[1].Value;
-                    if (!link.StartsWith("http"))
-                    {
-                        link = new Uri(new Uri(DownloadPage), link).AbsoluteUri;
-                    }
-                    zipLinks.Add(link);
-                }
-            }
-            
-            LogMessage($"Found {zipLinks.Count} ZIP links on the page");
-            
-            if (zipLinks.Count == 0)
-            {
-                throw new Exception("No ZIP download links found on the page");
-            }
-            
-            // Sort by version (assuming version numbers in URL)
-            zipLinks.Sort((a, b) =>
-            {
-                var versionA = ExtractVersion(a);
-                var versionB = ExtractVersion(b);
-                return CompareVersions(versionB, versionA);
-            });
-            
-            string latestUrl = zipLinks[0];
-            LogMessage($"Selected latest version: {string.Join(".", ExtractVersion(latestUrl))}");
-            
-            return latestUrl;
-        }
-    }
-    
-private List<int> ExtractVersion(string url)
-{
-    List<int> version = new List<int>();
-    
-    // Find all sequences of digits separated by dots
-    int startIndex = -1;
-    int endIndex = -1;
-    
-    for (int i = 0; i < url.Length; i++)
-    {
-        if (char.IsDigit(url[i]))
-        {
-            if (startIndex == -1)
-            {
-                startIndex = i;
-            }
-            endIndex = i;
-        }
-        else if (url[i] == '.' && startIndex != -1 && i + 1 < url.Length && char.IsDigit(url[i + 1]))
-        {
-            // Continue through dots that are part of version
-            endIndex = i;
-        }
-        else
-        {
-            if (startIndex != -1 && endIndex != -1)
-            {
-                // Check if this looks like a version number (has dots)
-                string potentialVersion = url.Substring(startIndex, endIndex - startIndex + 1);
-                if (potentialVersion.Contains("."))
-                {
-                    // Manual parsing without Split
-                    string currentNumber = "";
-                    for (int j = 0; j < potentialVersion.Length; j++)
-                    {
-                        if (char.IsDigit(potentialVersion[j]))
-                        {
-                            currentNumber += potentialVersion[j];
-                        }
-                        else if (potentialVersion[j] == '.')
-                        {
-                            if (currentNumber.Length > 0)
-                            {
-                                int num;
-                                if (int.TryParse(currentNumber, out num))
-                                {
-                                    version.Add(num);
-                                }
-                                currentNumber = "";
-                            }
-                        }
-                    }
-                    
-                    // Add the last number
-                    if (currentNumber.Length > 0)
-                    {
-                        int num;
-                        if (int.TryParse(currentNumber, out num))
-                        {
-                            version.Add(num);
-                        }
-                    }
-                    
-                    // Found a version, return it
-                    if (version.Count > 0)
-                    {
-                        return version;
-                    }
-                }
-                
-                // Reset for next potential version
-                startIndex = -1;
-                endIndex = -1;
-                version.Clear();
-            }
-        }
-    }
-    
-    return version;
-}
-    
-    private int CompareVersions(List<int> a, List<int> b)
-    {
-        int maxLength = Math.Max(a.Count, b.Count);
-        for (int i = 0; i < maxLength; i++)
-        {
-            int numA = i < a.Count ? a[i] : 0;
-            int numB = i < b.Count ? b[i] : 0;
-            
-            if (numA != numB)
-                return numA.CompareTo(numB);
-        }
-        
-        return 0;
-    }
-    
-    private string DownloadFile(string url, string destDir)
+    private string DownloadFile(string url, string destDir, string version)
     {
         Directory.CreateDirectory(destDir);
-        string fileName = Path.GetFileName(new Uri(url).LocalPath);
+        
+        // Extract filename from URL
+        Uri uri = new Uri(url);
+        string fileName = Path.GetFileName(uri.LocalPath);
+        
+        // Include version in filename if possible
+        if (!string.IsNullOrEmpty(version) && !fileName.Contains(version))
+        {
+            string baseName = Path.GetFileNameWithoutExtension(fileName);
+            string extension = Path.GetExtension(fileName);
+            fileName = $"{baseName}_v{version}{extension}";
+        }
+        
         string localPath = Path.Combine(destDir, fileName);
         
         LogMessage($"Download destination: {localPath}");
@@ -354,7 +350,7 @@ private List<int> ExtractVersion(string url)
                 
                 using (WebClient client = new WebClient())
                 {
-                    client.Headers.Add("User-Agent", "TESL-Reborn-Updater/1.0");
+                    client.Headers.Add("User-Agent", UserAgent);
                     client.OpenRead(url);
                     long remoteSize = Convert.ToInt64(client.ResponseHeaders["Content-Length"]);
                     LogMessage($"Remote file size: {FormatFileSize(remoteSize)}");
@@ -381,7 +377,7 @@ private List<int> ExtractVersion(string url)
         
         using (WebClient client = new WebClient())
         {
-            client.Headers.Add("User-Agent", "TESL-Reborn-Updater/1.0");
+            client.Headers.Add("User-Agent", UserAgent);
             
             // Add progress reporting
             client.DownloadProgressChanged += (sender, e) =>
@@ -480,46 +476,5 @@ private List<int> ExtractVersion(string url)
         LogMessage($"Total files extracted: {extractedCount}");
         
         return extractedCount;
-    }
-    
-    private int CleanupOldDownloads(string currentZipPath, string downloadDir)
-    {
-        int deletedCount = 0;
-        
-        try
-        {
-            if (!Directory.Exists(downloadDir))
-            {
-                LogMessage($"Download directory does not exist: {downloadDir}");
-                return 0;
-            }
-            
-            var files = Directory.GetFiles(downloadDir, "*.zip");
-            LogMessage($"Found {files.Length} ZIP files in download directory");
-            
-            foreach (var file in files)
-            {
-                if (!string.Equals(file, currentZipPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    try
-                    {
-                        FileInfo fileInfo = new FileInfo(file);
-                        LogMessage($"Deleting old file: {Path.GetFileName(file)} ({FormatFileSize(fileInfo.Length)})");
-                        File.Delete(file);
-                        deletedCount++;
-                    }
-                    catch (Exception ex)
-                    {
-                        LogMessage($"WARNING: Could not delete {file}: {ex.Message}");
-                    }
-                }
-            }
-        }
-        catch (Exception e)
-        {
-            LogMessage($"ERROR during cleanup: {e.Message}");
-        }
-        
-        return deletedCount;
     }
 }
