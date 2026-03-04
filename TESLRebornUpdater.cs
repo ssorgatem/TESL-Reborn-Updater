@@ -4,12 +4,15 @@ using System.Net;
 using System.Text.RegularExpressions;
 using System.Collections.Generic;
 using System.IO.Compression;
+using System.Diagnostics;
+using System.Reflection;
+using System.Security.Cryptography;
 
 class Program
 {
     static void Main(string[] args)
     {
-        new TESLRebornUpdater().Run();
+        new TESLRebornUpdater().Run(args);
     }
 }
 
@@ -18,13 +21,17 @@ public class TESLRebornUpdater
     private readonly string ApiUrl = "https://tesl-reborn.com/download";
     private readonly string UserAgent = "TESL-Reborn-Updater/2.0";
     private string _logFilePath;
+    private bool _skipSelfUpdate = false;
     
-    public void Run()
+    public void Run(string[] args)
     {
         Console.Title = "TESL Reborn Updater";
         Console.WriteLine("=======================================");
         Console.WriteLine("     TESL Reborn Updater");
         Console.WriteLine("=======================================");
+        
+        // Parse command line arguments
+        ParseArguments(args);
         
         try
         {
@@ -36,12 +43,33 @@ public class TESLRebornUpdater
             LogMessage("TESL Reborn Updater Started");
             LogMessage($"Timestamp: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             LogMessage($"Game Directory: {gameDir}");
+            LogMessage($"Command Line Arguments: {string.Join(" ", args)}");
+            LogMessage($"Skip Self-Update: {_skipSelfUpdate}");
             LogMessage("=======================================");
             
-            string downloadDir = Path.Combine(gameDir, "BepInEx", "TESLRebornDownloads");
+            // Check for updater self-update FIRST (unless disabled)
+            if (!_skipSelfUpdate)
+            {
+                Console.WriteLine("\n[1/5] Checking for updater updates...");
+                LogMessage("Phase 1: Checking for updater self-update");
+                
+                bool selfUpdated = CheckForSelfUpdate();
+                if (selfUpdated)
+                {
+                    // If we updated, the process will exit here and restart
+                    return;
+                }
+            }
+            else
+            {
+                Console.WriteLine("\n[1/5] Self-update disabled via command line");
+                LogMessage("Phase 1: Self-update skipped (disabled via command line)");
+            }
             
-            Console.WriteLine("\n[1/4] Checking for updates...");
-            LogMessage("Phase 1: Checking for updates");
+            string downloadDir = Path.Combine(gameDir, "TESLRebornDownloads");
+            
+            Console.WriteLine("\n[2/5] Checking for mod updates...");
+            LogMessage("Phase 2: Checking for mod updates");
             
             // Get update info from API
             var updateInfo = GetLatestUpdateInfo();
@@ -60,8 +88,8 @@ public class TESLRebornUpdater
             LogMessage($"Latest version found: {version}");
             LogMessage($"Download URL: {zipUrl}");
             
-            Console.WriteLine("\n[2/4] Downloading...");
-            LogMessage("Phase 2: Downloading");
+            Console.WriteLine("\n[3/5] Downloading...");
+            LogMessage("Phase 3: Downloading");
             
             string zipPath = DownloadFile(zipUrl, downloadDir, version);
             
@@ -82,15 +110,21 @@ public class TESLRebornUpdater
             FileInfo fileInfo = new FileInfo(zipPath);
             LogMessage($"Download size: {FormatFileSize(fileInfo.Length)}");
             
-            Console.WriteLine("\n[3/4] Extracting to game directory...");
-            LogMessage("Phase 3: Extracting files");
+            Console.WriteLine("\n[4/5] Deleting old BepInEx directory...");
+            LogMessage("Phase 4: Cleaning up old files");
+            
+            // Delete BepInEx directory (case-insensitive)
+            DeleteBepInExDirectory(gameDir);
+            
+            Console.WriteLine("\n[5/5] Extracting to game directory...");
+            LogMessage("Phase 5: Extracting files");
             
             int extractedCount = ExtractZip(zipPath, gameDir);
             Console.WriteLine($"    Extracted {extractedCount} files");
             LogMessage($"Extracted {extractedCount} files to: {gameDir}");
             
-            Console.WriteLine("\n[4/4] Complete!");
-            LogMessage("Phase 4: Update completed");
+            Console.WriteLine("\n✅ Complete!");
+            LogMessage("Phase 6: Update completed");
             
             Console.WriteLine($"\n✅ Update to version {version} completed successfully!");
             LogMessage($"SUCCESS: Update to version {version} completed successfully");
@@ -108,6 +142,246 @@ public class TESLRebornUpdater
             
             // Write error to a separate error log
             WriteErrorLog(e);
+            
+            Console.WriteLine("\nPress any key to exit...");
+            Console.ReadKey();
+        }
+    }
+    
+    /// <summary>
+    /// Parses command line arguments
+    /// </summary>
+    private void ParseArguments(string[] args)
+    {
+        if (args == null || args.Length == 0)
+            return;
+            
+        foreach (string arg in args)
+        {
+            string lowerArg = arg.ToLowerInvariant();
+            
+            // Check for no-self-update flag
+            if (lowerArg == "--no-self-update" || 
+                lowerArg == "-n" || 
+                lowerArg == "/noselfupdate" ||
+                lowerArg == "--skip-self-update" ||
+                lowerArg == "-s")
+            {
+                _skipSelfUpdate = true;
+            }
+            
+            // Add more argument parsing here if needed in the future
+        }
+    }
+    
+    /// <summary>
+    /// Calculates MD5 hash of a file
+    /// </summary>
+    private string CalculateMD5(string filename)
+    {
+        using (var md5 = MD5.Create())
+        {
+            using (var stream = File.OpenRead(filename))
+            {
+                var hash = md5.ComputeHash(stream);
+                return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Deletes the BepInEx directory if it exists (case-insensitive search)
+    /// </summary>
+    private void DeleteBepInExDirectory(string gameDir)
+    {
+        try
+        {
+            // Search for BepInEx directory (case-insensitive)
+            string[] directories = Directory.GetDirectories(gameDir, "*", SearchOption.TopDirectoryOnly);
+            string bepInExDir = null;
+            
+            foreach (string dir in directories)
+            {
+                if (string.Equals(Path.GetFileName(dir), "BepInEx", StringComparison.OrdinalIgnoreCase))
+                {
+                    bepInExDir = dir;
+                    break;
+                }
+            }
+            
+            if (bepInExDir != null && Directory.Exists(bepInExDir))
+            {
+                LogMessage($"Found BepInEx directory: {bepInExDir}");
+                Console.WriteLine($"    Deleting: {bepInExDir}");
+                
+                // Delete the directory recursively
+                Directory.Delete(bepInExDir, true);
+                
+                LogMessage("BepInEx directory deleted successfully");
+                Console.WriteLine("    BepInEx directory deleted");
+            }
+            else
+            {
+                LogMessage("No BepInEx directory found to delete");
+                Console.WriteLine("    No BepInEx directory found");
+            }
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"WARNING: Failed to delete BepInEx directory: {ex.Message}");
+            Console.WriteLine($"    Warning: Could not delete BepInEx directory: {ex.Message}");
+            // Continue with extraction even if deletion fails
+        }
+    }
+    
+    /// <summary>
+    /// Checks if the updater itself needs to be updated and performs self-update if necessary
+    /// </summary>
+    /// <returns>True if a self-update was performed and the process will exit</returns>
+    private bool CheckForSelfUpdate()
+    {
+        try
+        {
+            // URL for the updater executable - replace with actual URL
+            string updaterUrl = "https://github.com/ssorgatem/TESL-Reborn-Updater/releases/latest/download/TESLRebornUpdater.exe";
+            
+            LogMessage("Checking for updater self-update");
+            
+            string currentExe = Assembly.GetEntryAssembly().Location;
+            string tempFile = Path.Combine(Path.GetTempPath(), "TESLRebornUpdater_new.exe");
+            
+            // Download latest updater to temp file
+            using (WebClient client = new WebClient())
+            {
+                client.Headers.Add("User-Agent", UserAgent);
+                
+                try
+                {
+                    Console.Write("    Downloading latest updater... ");
+                    client.DownloadFile(updaterUrl, tempFile);
+                    
+                    // Check if download was successful (file has content)
+                    FileInfo tempInfo = new FileInfo(tempFile);
+                    if (tempInfo.Length > 0)
+                    {
+                        Console.WriteLine("Done!");
+                        LogMessage($"Downloaded updater update ({FormatFileSize(tempInfo.Length)})");
+                        
+                        // Calculate MD5 hashes for comparison
+                        string currentHash = CalculateMD5(currentExe);
+                        string newHash = CalculateMD5(tempFile);
+                        
+                        LogMessage($"Current executable MD5: {currentHash}");
+                        LogMessage($"New executable MD5: {newHash}");
+                        
+                        if (currentHash == newHash)
+                        {
+                            Console.WriteLine("    Updater already up to date (MD5 match).");
+                            LogMessage("Updater MD5 matches, already up to date");
+                            File.Delete(tempFile);
+                            return false;
+                        }
+                        
+                        Console.WriteLine("    New version detected (MD5 differs).");
+                        Console.WriteLine("    Performing self-update...");
+                        
+                        // Perform self-update
+                        PerformSelfUpdate(tempFile, currentExe);
+                        return true; // Will exit process
+                    }
+                    else
+                    {
+                        Console.WriteLine("Failed!");
+                        File.Delete(tempFile);
+                    }
+                }
+                catch (WebException)
+                {
+                    Console.WriteLine("Not available.");
+                    // No update available or failed to download - ignore
+                    LogMessage("No updater update available or download failed");
+                    try { File.Delete(tempFile); } catch { }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"Self-update check failed: {ex.Message}");
+            // Continue normally - self-update is optional
+        }
+        
+        return false;
+    }
+    
+    /// <summary>
+    /// Performs the actual self-update by replacing the current executable
+    /// </summary>
+    private void PerformSelfUpdate(string newExePath, string currentExePath)
+    {
+        try
+        {
+            LogMessage("Starting self-update process");
+            
+            string directory = Path.GetDirectoryName(currentExePath);
+            string backupFile = Path.Combine(directory, 
+                Path.GetFileNameWithoutExtension(currentExePath) + ".old");
+            string batchFile = Path.Combine(Path.GetTempPath(), "update_updater.bat");
+            
+            // Create batch file to complete the update
+            string batchContent = $@"@echo off
+echo.
+echo =======================================
+echo     TESL Reborn Updater - Self Update
+echo =======================================
+echo.
+echo Completing updater update...
+echo.
+timeout /t 1 /nobreak > nul
+:loop
+del ""{backupFile}"" 2> nul
+if exist ""{backupFile}"" goto loop
+copy /y ""{newExePath}"" ""{currentExePath}""
+del ""{newExePath}""
+echo.
+echo Updater updated successfully!
+echo Restarting...
+timeout /t 2 /nobreak > nul
+start """" ""{currentExePath}""
+del ""%~f0""
+";
+            
+            File.WriteAllText(batchFile, batchContent);
+            LogMessage($"Created batch file: {batchFile}");
+            
+            // Rename current executable
+            if (File.Exists(backupFile))
+                File.Delete(backupFile);
+            
+            File.Move(currentExePath, backupFile);
+            LogMessage($"Renamed current executable to: {backupFile}");
+            
+            Console.WriteLine("    Updater will restart automatically...");
+            
+            // Start batch file and exit
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = batchFile,
+                UseShellExecute = true,
+                CreateNoWindow = false,
+                WindowStyle = ProcessWindowStyle.Normal
+            });
+            
+            LogMessage("Self-update initiated, exiting current process");
+            
+            // Exit current process
+            Environment.Exit(0);
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"Self-update failed: {ex.Message}");
+            Console.WriteLine($"    Self-update failed: {ex.Message}");
+            // Clean up temp file
+            try { File.Delete(newExePath); } catch { }
         }
     }
     
